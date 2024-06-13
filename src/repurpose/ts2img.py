@@ -67,6 +67,7 @@ def _write_img(
         filename: str,
         annual_folder: bool = True,
         encoding: dict = None,
+        unlimited_dims=None
 ):
     """
     Wrapper to allow writing several images in parallel (see
@@ -77,11 +78,11 @@ def _write_img(
         out_path = os.path.join(out_path, f"{dt.year:04}")
 
     if not os.path.exists(out_path):
-        os.makedirs(out_path)
+        os.makedirs(out_path, exist_ok=True)
 
     image.attrs['date_created'] = f"File created: {datetime.now()}"
     image.to_netcdf(os.path.join(out_path, filename),
-                    engine='netcdf4', encoding=encoding)
+                    engine='netcdf4', encoding=encoding, unlimited_dims=unlimited_dims)
 
     image.close()
 
@@ -146,6 +147,8 @@ class Ts2Img:
     ignore_errors: bool, optional (default: False)
         Instead of raising an exception, log errors and continue the
         process. E.g. to skip individual corrupt files.
+    backend: str, optional. Default  is 'locky'
+        Backend to be passed to 'process.parallel_process_async'
     """
 
     # Some variables are generated internally and cannot be used.
@@ -157,7 +160,7 @@ class Ts2Img:
     def __init__(self, ts_reader, img_grid, timestamps,
                  variables=None, read_function='read',
                  max_dist=18000, time_collocation=True, loglevel="WARNING",
-                 ignore_errors=False):
+                 ignore_errors=False, backend='locky'):
 
         self.ts_reader = ts_reader
         self.img_grid: CellGrid = Regular3dimImageStack._eval_grid(img_grid)
@@ -176,6 +179,7 @@ class Ts2Img:
 
         self.loglevel = loglevel
         self.stack = None
+        self.backend = backend
 
 
     def _cell_writer(self, cell: int, timestamps_chunk: pd.DatetimeIndex):
@@ -242,6 +246,7 @@ class Ts2Img:
 
         stack = parallel_process_async(
             _convert, ITER_KWARGS, STATIC_KWARGS, n_proc=n_proc,
+            backend=self.backend,
             show_progress_bars=True, log_path=log_path,
             verbose=False, ignore_errors=self.ignore_errors)
 
@@ -258,6 +263,7 @@ class Ts2Img:
              fn_template="{datetime}.nc",
              drop_empty=False, encoding=None, zlib=True, glob_attrs=None,
              var_attrs=None, var_fillvalues=None, var_dtypes=None,
+             unlimited_dims=None,
              img_buffer=100, n_proc=1):
         """
         Perform conversion of all time series to images. This will first split
@@ -359,6 +365,8 @@ class Ts2Img:
             Size of the stack before writing to disk. Larger stacks need
             more memory but will lead to faster conversion.
             Passing -1 means that the whole stack loaded into memory at once.
+        unlimited_dims: list, optional (default: None)
+            unlimited_dims parameter of xarray.Dataset.to_netcdf
         n_proc: int, optional (default: 1)
             Number of processes to use for parallel processing. We parallelize
             by 5 deg. grid cell.
@@ -444,18 +452,18 @@ class Ts2Img:
                     fname = fn_template.format(datetime=f"{dt_from}_{dt_to}")
                 else:
                     fname = fn_template
-                self.stack.to_netcdf(os.path.join(path_out, fname),
+                self.stack.to_netcdf(os.path.join(path_out, fname), unlimited_dims=unlimited_dims,
                                      encoding=encoding)
                 self.stack = None
             elif format_out == 'slice':
                 self.store_netcdf_images(
-                    path_out, fn_template, keep=False, encoding=encoding,
+                    path_out, fn_template, keep=False, encoding=encoding, unlimited_dims=unlimited_dims,
                     annual_folder=True, n_proc=n_proc)
             else:
                 raise NotImplementedError("Unknown `format_out`")
 
     def store_netcdf_images(self, path_out, fn_template=f"{datetime}.nc",
-                            encoding=None, annual_folder=True,
+                            encoding=None, annual_folder=True, unlimited_dims=None,
                             keep=False, n_proc=1):
         """
         Write the (global) merged image stack to netcdf files.
@@ -494,6 +502,7 @@ class Ts2Img:
         dts = []
         filenames = []
         drop_z = []
+        # import pdb; pdb.set_trace()
         for z in self.stack['time'].values:
             dt = pd.to_datetime(z).to_pydatetime()
             filename = fn_template.format(
@@ -518,12 +527,13 @@ class Ts2Img:
 
         ITER_KWARGS = {'image': images, 'filename': filenames, 'dt': dts}
         STATIC_KWARGS = {'out_path': path_out, 'annual_folder': annual_folder,
-                         'encoding': encoding}
+                         'encoding': encoding, 'unlimited_dims': unlimited_dims}
 
         _ = parallel_process_async(
             FUNC=_write_img,
             ITER_KWARGS=ITER_KWARGS,
             STATIC_KWARGS=STATIC_KWARGS,
+            backend=self.backend,
             n_proc=n_proc,
             show_progress_bars=True,
             verbose=False,
